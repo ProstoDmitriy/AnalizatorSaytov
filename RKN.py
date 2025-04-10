@@ -8,7 +8,7 @@ from whois import whois as get_whois_data
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Функция для автоматической установки модулей
+# Функция для автоматической установки модулей (при необходимости)
 def install(pkg):
     try:
         __import__(pkg)
@@ -151,7 +151,7 @@ async def check_metrics(domain):
     except Exception as e:
         return [f"Ошибка при проверке метрических программ: {e}"]
 
-# Асинхронный поиск ИНН во всех источниках (WHOIS, HTML, метатеги и т.д.)
+# Асинхронный расширенный поиск ИНН во всех источниках (WHOIS, HTML, метатеги и т.д.)
 async def search_inn(domain):
     inns = set()
     # Поиск в WHOIS-данных (синхронно)
@@ -169,7 +169,6 @@ async def search_inn(domain):
             clean = re.sub(r"[\s-]", "", match)
             if len(clean) in (10, 12):
                 inns.add(clean)
-        # Поиск в метатегах и прочих тегах через BeautifulSoup
         try:
             soup = BeautifulSoup(html, "html.parser")
             for tag in soup.find_all(["meta", "script", "div", "span", "a", "footer"]):
@@ -214,6 +213,7 @@ async def search_inn_ext(domain):
     return list(inns)
 
 # Асинхронное получение подробной информации из реестра РКН по ИНН
+# (Интегрирована логика, заимствованная из репозитория rkn_registry)
 async def get_rkn_operator_details_by_inn(inn):
     base_url = "https://pd.rkn.gov.ru/operators-registry/operators-list/"
     params = {"inn": inn}
@@ -250,7 +250,24 @@ async def get_rkn_operator_details_by_inn(inn):
             details[field] = value
     return details if details else None
 
-# Функция пакетной проверки ИНН через реестр РКН
+# Новая функция: Асинхронная проверка блокировки сайта через API RKN
+async def check_site_rkn_api(domain):
+    url = f"https://rknweb.ru/api/v3/domains/?domain={domain}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Предположим, что API возвращает ключ "blocked": True/False
+                    return data.get("blocked", False)
+                else:
+                    return False
+    except Exception as e:
+        logging.error(f"Ошибка проверки домена через RKN API: {e}")
+        return False
+
+# Функция пакетной проверки ИНН через реестр РКН (синхронно)
 def check_inn_in_rkn_registry(inn_list):
     results = {}
     for inn in inn_list:
@@ -329,14 +346,14 @@ def sync_rkn_db():
             data_start = data.get("Дата начала обработки", "")
             other_info = json.dumps(data, ensure_ascii=False)
             cur.execute('''INSERT INTO operators 
-                        (reg_number, operator_name, inn, operator_type, inclusion_basis, notification_date, data_start_date, legal_address, other_info) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                           (reg_number, operator_name, inn, operator_type, inclusion_basis, notification_date, data_start_date, legal_address, other_info) 
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (reg_number, op_name_inn, "", op_type, inclusion_basis, notification_date, data_start, "", other_info))
             conn.commit()
             logging.info(f"Добавлен регистратор с регистрационным номером: {reg_number}")
     conn.close()
 
-# Основной цикл программы с меню
+# Основное меню и цикл программы
 async def main():
     logging.info("Синхронизация базы данных с реестром РКН...")
     sync_rkn_db()
@@ -347,6 +364,7 @@ async def main():
         print("1 - Проверка сайта")
         print("2 - Пакетная проверка ИНН из файла (inns.txt)")
         print("3 - Ручная проверка ИНН")
+        print("4 - Проверка блокировки сайта через API RKN")
         mode = input("Введите номер режима: ").strip()
         
         if mode == "2":
@@ -385,6 +403,14 @@ async def main():
                         print(f"{k}: {v}")
             else:
                 print("Подробная информация по данному ИНН не найдена.")
+        elif mode == "4":
+            domain = extract_domain(input("Введите адрес сайта для проверки через RKN API (например, https://www.example.com): "))
+            print("\n--- Проверка блокировки сайта через API RKN ---")
+            is_blocked = await check_site_rkn_api(domain)
+            if is_blocked:
+                print(f"Сайт {domain} заблокирован (RKN API).")
+            else:
+                print(f"Сайт {domain} не заблокирован (RKN API).")
         else:
             domain = extract_domain(input("Введите адрес сайта (например, https://www.example.com): "))
             
